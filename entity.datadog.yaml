@@ -1,0 +1,522 @@
+# Paychex Flex — Datadog Software Catalog (schema v3.0)
+#
+# Datadog's GitHub integration auto-discovers any file named `entity.datadog.yaml`
+# or `service.datadog.yaml` in connected repositories and syncs the entities into
+# the Software Catalog. No GitHub Action or API call is required — connect the repo
+# under Integrations → GitHub, and the catalog populates on next sync.
+#
+# Topology:
+#   1 system        — paychex-flex (parent)
+#   12 services     — payroll, time, HR, recruiting, benefits, analytics, platform
+#   4 datastores    — Azure SQL + Synapse
+#   2 queues        — Kafka + Azure Service Bus
+#
+# Multi-document YAML: each entity is separated by `---`.
+
+---
+# =============================================================================
+# Parent system
+# =============================================================================
+apiVersion: v3
+kind: system
+metadata:
+  name: paychex-flex
+  displayName: "Paychex Flex"
+  description: "Paychex's flagship B2B SaaS platform for payroll, HR, benefits, time & attendance, recruiting, and analytics. Serves ~16K Paychex employees operating the platform and hundreds of thousands of small/mid-market employer clients."
+  tags:
+    - system:paychex-flex
+    - cloud:azure
+  owner: paychex-monitoring-engineering
+  additionalOwners:
+    - name: Paychex Platform Engineering
+      type: stakeholder
+  links:
+    - name: Paychex Flex product page
+      type: doc
+      url: https://www.paychex.com/
+    - name: Runbook
+      type: runbook
+      url: https://torii.datadoghq.com/
+spec:
+  lifecycle: production
+  tier: "0"
+  components:
+    - service:flex-api-gateway
+    - service:flex-auth-service
+    - service:flex-payroll-web
+    - service:flex-payroll-api
+    - service:flex-payroll-engine
+    - service:flex-taxpay-service
+    - service:flex-time-clock-api
+    - service:flex-hr-employee-records-api
+    - service:flex-recruit-copilot-service
+    - service:flex-benefits-enrollment-api
+    - service:flex-notification-service
+    - service:flex-analytics-query-api
+    - datastore:flex-payroll-db
+    - datastore:flex-hr-db
+    - datastore:flex-time-db
+    - datastore:flex-analytics-warehouse
+    - queue:flex-payroll-batch-queue
+    - queue:flex-notification-queue
+
+---
+# =============================================================================
+# Platform tier — edge & auth (everything depends on these)
+# =============================================================================
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-api-gateway
+  displayName: "Flex API Gateway"
+  description: "Public API edge for Paychex Flex. Terminates TLS, enforces rate limits, routes to internal services."
+  tags:
+    - system:paychex-flex
+    - domain:platform
+    - cloud:azure
+    - runtime:java
+  owner: paychex-platform-engineering
+spec:
+  lifecycle: production
+  tier: "0"
+  type: web
+  languages:
+    - java
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - service:flex-auth-service
+
+---
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-auth-service
+  displayName: "Flex Auth Service"
+  description: "Login, SSO, MFA, token issue/refresh for employer admins, employees, and partners. Multi-tenant identity."
+  tags:
+    - system:paychex-flex
+    - domain:platform
+    - cloud:azure
+    - runtime:dotnet
+  owner: paychex-platform-engineering
+spec:
+  lifecycle: production
+  tier: "0"
+  type: web
+  languages:
+    - csharp
+  componentOf:
+    - system:paychex-flex
+
+---
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-notification-service
+  displayName: "Flex Notification Service"
+  description: "Email and SMS dispatcher for payroll confirmations, benefits enrollment reminders, and recruiting alerts."
+  tags:
+    - system:paychex-flex
+    - domain:platform
+    - cloud:azure
+    - runtime:java
+  owner: paychex-platform-engineering
+spec:
+  lifecycle: production
+  tier: "1"
+  type: custom
+  languages:
+    - java
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - queue:flex-notification-queue
+
+---
+# =============================================================================
+# Payroll domain — the demo headliner
+# =============================================================================
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-payroll-web
+  displayName: "Flex Payroll Web"
+  description: "Employer-facing payroll UI. The 'run payroll' screen used by Paychex client businesses."
+  tags:
+    - system:paychex-flex
+    - domain:payroll
+    - cloud:azure
+    - runtime:java
+    - tier:essentials
+  owner: paychex-payroll-platform-team
+spec:
+  lifecycle: production
+  tier: "0"
+  type: web
+  languages:
+    - java
+    - javascript
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - service:flex-api-gateway
+    - service:flex-payroll-api
+    - service:flex-auth-service
+
+---
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-payroll-api
+  displayName: "Flex Payroll API"
+  description: "Payroll submission and edit API. Receives 'run payroll' requests, validates, queues a batch run. The endpoint behind the demo's Watchdog alert."
+  tags:
+    - system:paychex-flex
+    - domain:payroll
+    - cloud:azure
+    - runtime:java
+    - tier:essentials
+  owner: paychex-payroll-platform-team
+spec:
+  lifecycle: production
+  tier: "0"
+  type: web
+  languages:
+    - java
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - service:flex-auth-service
+    - service:flex-payroll-engine
+    - service:flex-hr-employee-records-api
+    - service:flex-notification-service
+    - datastore:flex-payroll-db
+    - queue:flex-payroll-batch-queue
+
+---
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-payroll-engine
+  displayName: "Flex Payroll Engine"
+  description: "Gross-to-net calculation engine: earnings, deductions, garnishments, retirement contributions. Consumes batch jobs from the payroll queue."
+  tags:
+    - system:paychex-flex
+    - domain:payroll
+    - cloud:azure
+    - runtime:java
+    - tier:essentials
+  owner: paychex-payroll-platform-team
+spec:
+  lifecycle: production
+  tier: "0"
+  type: custom
+  languages:
+    - java
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - service:flex-taxpay-service
+    - service:flex-hr-employee-records-api
+    - datastore:flex-payroll-db
+    - queue:flex-payroll-batch-queue
+
+---
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-taxpay-service
+  displayName: "Flex Taxpay Service"
+  description: "Automated federal, state, and local tax administration. Computes withholdings and files returns with the IRS and state agencies."
+  tags:
+    - system:paychex-flex
+    - domain:payroll
+    - cloud:azure
+    - runtime:java
+    - tier:essentials
+  owner: paychex-payroll-platform-team
+spec:
+  lifecycle: production
+  tier: "0"
+  type: custom
+  languages:
+    - java
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - datastore:flex-payroll-db
+
+---
+# =============================================================================
+# Time & Attendance domain
+# =============================================================================
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-time-clock-api
+  displayName: "Flex Time Clock API"
+  description: "Punch-in/out endpoint serving web, mobile, kiosk, and biometric clocks. Feeds time data into payroll runs."
+  tags:
+    - system:paychex-flex
+    - domain:time
+    - cloud:azure
+    - runtime:java
+    - tier:select
+  owner: paychex-time-attendance-team
+spec:
+  lifecycle: production
+  tier: "1"
+  type: web
+  languages:
+    - java
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - service:flex-auth-service
+    - service:flex-hr-employee-records-api
+    - datastore:flex-time-db
+
+---
+# =============================================================================
+# HR domain
+# =============================================================================
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-hr-employee-records-api
+  displayName: "Flex HR Employee Records API"
+  description: "System of record for employee master data: hire/term dates, pay rates, deductions, benefits eligibility. Read by virtually every other service."
+  tags:
+    - system:paychex-flex
+    - domain:hr
+    - cloud:azure
+    - runtime:java
+    - tier:essentials
+  owner: paychex-hr-platform-team
+spec:
+  lifecycle: production
+  tier: "0"
+  type: web
+  languages:
+    - java
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - service:flex-auth-service
+    - datastore:flex-hr-db
+
+---
+# =============================================================================
+# Recruiting / AI domain (FY26 strategic emphasis)
+# =============================================================================
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-recruit-copilot-service
+  displayName: "Flex Recruit Copilot"
+  description: "AI-powered job-post writer and candidate matcher (announced Dec 2025). Aligns to Paychex's FY26 'AI-powered HCM' strategy."
+  tags:
+    - system:paychex-flex
+    - domain:recruit
+    - cloud:azure
+    - runtime:python
+    - tier:pro
+    - ai:enabled
+  owner: paychex-recruiting-ai-team
+spec:
+  lifecycle: production
+  tier: "1"
+  type: custom
+  languages:
+    - python
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - service:flex-auth-service
+    - service:flex-hr-employee-records-api
+    - service:flex-notification-service
+
+---
+# =============================================================================
+# Benefits domain
+# =============================================================================
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-benefits-enrollment-api
+  displayName: "Flex Benefits Enrollment API"
+  description: "Open-enrollment API for health, FSA/HSA, COBRA, and voluntary benefits. Pushes 834 EDI to carriers."
+  tags:
+    - system:paychex-flex
+    - domain:benefits
+    - cloud:azure
+    - runtime:java
+    - tier:select
+  owner: paychex-benefits-platform-team
+spec:
+  lifecycle: production
+  tier: "1"
+  type: web
+  languages:
+    - java
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - service:flex-auth-service
+    - service:flex-hr-employee-records-api
+
+---
+# =============================================================================
+# Analytics domain
+# =============================================================================
+apiVersion: v3
+kind: service
+metadata:
+  name: flex-analytics-query-api
+  displayName: "Flex Analytics Query API"
+  description: "Ad-hoc reporting and workforce-insights queries. Reads from the analytics warehouse, not transactional DBs."
+  tags:
+    - system:paychex-flex
+    - domain:analytics
+    - cloud:azure
+    - runtime:java
+    - tier:enterprise
+  owner: paychex-analytics-team
+spec:
+  lifecycle: production
+  tier: "2"
+  type: web
+  languages:
+    - java
+  componentOf:
+    - system:paychex-flex
+  dependsOn:
+    - service:flex-auth-service
+    - datastore:flex-analytics-warehouse
+
+---
+# =============================================================================
+# Datastores
+# =============================================================================
+apiVersion: v3
+kind: datastore
+metadata:
+  name: flex-payroll-db
+  displayName: "Flex Payroll DB"
+  description: "Azure SQL — payroll runs, earnings, deductions, garnishments. Tier-0 transactional store."
+  tags:
+    - system:paychex-flex
+    - domain:payroll
+    - cloud:azure
+    - datastore-type:azure-sql
+  owner: paychex-payroll-platform-team
+spec:
+  lifecycle: production
+  tier: "0"
+  type: db
+  componentOf:
+    - system:paychex-flex
+
+---
+apiVersion: v3
+kind: datastore
+metadata:
+  name: flex-hr-db
+  displayName: "Flex HR DB"
+  description: "Azure SQL — employee master records, org structure, pay rates."
+  tags:
+    - system:paychex-flex
+    - domain:hr
+    - cloud:azure
+    - datastore-type:azure-sql
+  owner: paychex-hr-platform-team
+spec:
+  lifecycle: production
+  tier: "0"
+  type: db
+  componentOf:
+    - system:paychex-flex
+
+---
+apiVersion: v3
+kind: datastore
+metadata:
+  name: flex-time-db
+  displayName: "Flex Time DB"
+  description: "Azure SQL — punches, schedules, PTO accrual balances."
+  tags:
+    - system:paychex-flex
+    - domain:time
+    - cloud:azure
+    - datastore-type:azure-sql
+  owner: paychex-time-attendance-team
+spec:
+  lifecycle: production
+  tier: "1"
+  type: db
+  componentOf:
+    - system:paychex-flex
+
+---
+apiVersion: v3
+kind: datastore
+metadata:
+  name: flex-analytics-warehouse
+  displayName: "Flex Analytics Warehouse"
+  description: "Azure Synapse / dedicated SQL pool — overnight ETL'd reporting warehouse fed from transactional sources."
+  tags:
+    - system:paychex-flex
+    - domain:analytics
+    - cloud:azure
+    - datastore-type:azure-synapse
+  owner: paychex-analytics-team
+spec:
+  lifecycle: production
+  tier: "2"
+  type: db
+  componentOf:
+    - system:paychex-flex
+
+---
+# =============================================================================
+# Queues
+# =============================================================================
+apiVersion: v3
+kind: queue
+metadata:
+  name: flex-payroll-batch-queue
+  displayName: "Flex Payroll Batch Queue"
+  description: "Kafka topic carrying payroll-run jobs from the Payroll API to the Payroll Engine."
+  tags:
+    - system:paychex-flex
+    - domain:payroll
+    - cloud:azure
+    - messaging:kafka
+  owner: paychex-payroll-platform-team
+spec:
+  lifecycle: production
+  tier: "0"
+  type: queue
+  componentOf:
+    - system:paychex-flex
+
+---
+apiVersion: v3
+kind: queue
+metadata:
+  name: flex-notification-queue
+  displayName: "Flex Notification Queue"
+  description: "Azure Service Bus topic for outbound email/SMS notifications."
+  tags:
+    - system:paychex-flex
+    - domain:platform
+    - cloud:azure
+    - messaging:azure-service-bus
+  owner: paychex-platform-engineering
+spec:
+  lifecycle: production
+  tier: "1"
+  type: queue
+  componentOf:
+    - system:paychex-flex
