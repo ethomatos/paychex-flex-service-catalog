@@ -13,11 +13,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install datadog-ci
-        run: npm install -g @datadog/datadog-ci
-
       - name: Upload service catalog entities
         env:
           DD_API_KEY: ${{ secrets.DD_API_KEY }}
-          DD_SITE: datadoghq.com
-        run: datadog-ci catalog upload entity.datadog.yaml
+          DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
+        run: |
+          pip install pyyaml requests --quiet
+          python3 - <<'EOF'
+          import yaml, json, requests, os, sys
+
+          headers = {
+              'DD-API-KEY': os.environ['DD_API_KEY'],
+              'DD-APPLICATION-KEY': os.environ['DD_APP_KEY'],
+              'Content-Type': 'application/json',
+          }
+
+          with open('entity.datadog.yaml') as f:
+              entities = [d for d in yaml.safe_load_all(f) if d]
+
+          resp = requests.post(
+              'https://api.datadoghq.com/api/v2/catalog/entity',
+              json=entities,
+              headers=headers,
+          )
+
+          if not resp.ok:
+              print(f"Error {resp.status_code}: {resp.text}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"Uploaded {len(entities)} entities (HTTP {resp.status_code})")
+          EOF
