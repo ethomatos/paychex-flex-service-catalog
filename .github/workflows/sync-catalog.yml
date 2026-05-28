@@ -31,15 +31,21 @@ jobs:
           with open('entity.datadog.yaml') as f:
               entities = [d for d in yaml.safe_load_all(f) if d]
 
-          resp = requests.post(
-              'https://api.datadoghq.com/api/v2/catalog/entity',
-              json=entities,
-              headers=headers,
-          )
+          failed = 0
+          for entity in entities:
+              name = entity.get('metadata', {}).get('name', '?')
+              resp = requests.post(
+                  'https://api.datadoghq.com/api/v2/catalog/entity',
+                  json=entity,
+                  headers=headers,
+              )
+              if resp.ok:
+                  print(f"OK {resp.status_code}: {name}")
+              else:
+                  print(f"ERROR {resp.status_code}: {name} — {resp.text}", file=sys.stderr)
+                  failed += 1
 
-          if not resp.ok:
-              print(f"Error {resp.status_code}: {resp.text}", file=sys.stderr)
+          if failed:
               sys.exit(1)
-
-          print(f"Uploaded {len(entities)} entities (HTTP {resp.status_code})")
+          print(f"Done: {len(entities)} entities uploaded.")
           EOF
